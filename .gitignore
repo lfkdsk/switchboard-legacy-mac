@@ -1,0 +1,5 @@
+.DS_Store
+*.dmg
+macos/.build/
+macos/build/
+macos/minos-report.txt

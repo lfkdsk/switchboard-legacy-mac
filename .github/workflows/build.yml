@@ -1,0 +1,138 @@
+name: Build Catalina x64
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: legacy-mac-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build, test, and inspect
+    runs-on: macos-15-intel
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "10.15"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20.18.0"
+          registry-url: https://registry.npmjs.org
+
+      - name: Toolchain and host
+        run: |
+          test "$(uname -m)" = x86_64
+          sw_vers
+          xcodebuild -version
+          swift --version
+          node --version
+          npm --version
+          xcrun --sdk macosx --show-sdk-version
+
+      - name: Reject post-Catalina APIs and app updater dependencies
+        run: |
+          if grep -R -n -E 'import SwiftUI|MenuBarExtra|SMAppService|import Sparkle|URLSession\.shared\.data\(for:' \
+              macos/Sources macos/Package.swift; then
+            echo "found a post-Catalina API or removed app updater dependency" >&2
+            exit 1
+          fi
+
+      - name: CLI syntax
+        run: |
+          node --check cli/index.js
+          node --check cli/activity.js
+          node --check cli/peer.js
+          node --check cli/scripts/fix-pty-perms.js
+
+      - name: Resolve version
+        id: version
+        working-directory: macos
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            bash scripts/version-info.sh "$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+          else
+            bash scripts/version-info.sh 0.1.0 >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Swift tests at the deployment target
+        working-directory: macos
+        run: swift test --arch x86_64
+
+      - name: Build ad-hoc signed app
+        working-directory: macos
+        env:
+          VERSION: ${{ steps.version.outputs.marketing_version }}
+          BUILD_VERSION: ${{ steps.version.outputs.build_version }}
+        run: |
+          chmod +x scripts/*.sh run-dev.sh
+          CONFIG=release scripts/make-app.sh
+
+      - name: Verify app bundle and Mach-O minimum OS
+        working-directory: macos
+        run: |
+          APP=build/Switchboard.app
+          codesign --verify --strict --deep --verbose=2 "$APP"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$APP/Contents/Info.plist")" = "10.15"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' "$APP/Contents/Info.plist")" = "true"
+          test ! -e "$APP/Contents/Frameworks/Sparkle.framework"
+          scripts/check-minos.sh "$APP" | tee minos-report.txt
+
+      - name: Best-effort isolated daemon self-test
+        continue-on-error: true
+        working-directory: macos
+        run: SELFTEST_SECONDS=12 build/Switchboard.app/Contents/MacOS/Switchboard --selftest
+
+      - name: Package DMG
+        working-directory: macos
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          DMG="Switchboard-${RELEASE_VERSION}-Catalina-x64.dmg"
+          STAGE="$RUNNER_TEMP/Switchboard-DMG"
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE"
+          ditto build/Switchboard.app "$STAGE/Switchboard.app"
+          ln -s /Applications "$STAGE/Applications"
+          hdiutil create -volname "Switchboard Legacy" -srcfolder "$STAGE" \
+            -ov -format UDZO "$DMG"
+          echo "DMG=$DMG" >> "$GITHUB_ENV"
+
+      - name: Upload DMG and minos report
+        uses: actions/upload-artifact@v4
+        with:
+          name: Switchboard-Catalina-x64
+          path: |
+            macos/${{ env.DMG }}
+            macos/minos-report.txt
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: Publish prerelease
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: Switchboard-Catalina-x64
+          path: dist
+      - name: Publish GitHub prerelease
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Switchboard Legacy Mac ${{ github.ref_name }}
+          body_path: RELEASE_NOTES.md
+          files: dist/*.dmg
+          prerelease: true
+          make_latest: false
+          fail_on_unmatched_files: true
