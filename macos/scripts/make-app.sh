@@ -31,6 +31,26 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/Switchboard"
 
+# Swift concurrency is not part of the OS before macOS 12. The binary links
+# @rpath/libswift_Concurrency.dylib (weak), and the only rpath that holds it
+# points into the build machine's Xcode, so on Catalina every Task/await
+# crashes at launch. Ship Apple's back-deployment copy inside the bundle.
+echo "▸ embedding Swift concurrency back-deployment library"
+BACKDEPLOY="$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.5/macosx"
+[ -f "$BACKDEPLOY/libswift_Concurrency.dylib" ] \
+  || { echo "missing $BACKDEPLOY/libswift_Concurrency.dylib" >&2; exit 1; }
+mkdir -p "$APP/Contents/Frameworks"
+cp "$BACKDEPLOY/libswift_Concurrency.dylib" "$APP/Contents/Frameworks/"
+install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP/Contents/MacOS/Switchboard"
+
+# Every @rpath dependency must resolve inside the bundle; build-machine rpaths
+# (Xcode toolchain, /usr/lib/swift for libraries Catalina lacks) do not count.
+while read -r dep; do
+  lib="${dep#@rpath/}"
+  [ -f "$APP/Contents/Frameworks/$lib" ] \
+    || { echo "unbundled @rpath dependency: $dep" >&2; exit 1; }
+done < <(otool -L "$APP/Contents/MacOS/Switchboard" | awk '/@rpath\//{print $1}')
+
 ICON_PLIST=""
 if [ -f "$MACOS_DIR/Resources/AppIcon.icns" ]; then
   cp "$MACOS_DIR/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
@@ -74,6 +94,7 @@ while IFS= read -r -d '' file_path; do
   codesign --force --sign - "$file_path"
   echo "    signed ${file_path#"$APP/Contents/"}"
 done < <(find "$APP/Contents/Resources" -type f -print0)
+codesign --force --sign - "$APP/Contents/Frameworks/libswift_Concurrency.dylib"
 codesign --force --sign - "$APP/Contents/MacOS/Switchboard"
 codesign --force --sign - "$APP"
 codesign --verify --strict --deep --verbose=2 "$APP"
