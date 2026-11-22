@@ -311,7 +311,7 @@ final class DaemonSupervisor: ObservableObject {
         let url = dir.appendingPathComponent("daemon.log")
         if !fm.fileExists(atPath: url.path) { fm.createFile(atPath: url.path, contents: nil) }
         let h = try? FileHandle(forWritingTo: url)
-        _ = try? h?.seekToEnd()
+        h?.seekToEndOfFile()
         return h
     }
 }

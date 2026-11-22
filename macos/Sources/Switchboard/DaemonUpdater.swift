@@ -378,9 +378,11 @@ final class DaemonUpdater: ObservableObject {
         let url = dir.appendingPathComponent("updater.log")
         let line = "[\(ISO8601DateFormatter().string(from: Date()))] \(s)\n"
         if let h = try? FileHandle(forWritingTo: url) {
-            _ = try? h.seekToEnd()
-            try? h.write(contentsOf: Data(line.utf8))
-            try? h.close()
+            // The throwing FileHandle methods start at macOS 10.15.4. Use the
+            // original APIs so Catalina 10.15.0 through 10.15.3 also compile.
+            h.seekToEndOfFile()
+            h.write(Data(line.utf8))
+            h.closeFile()
         } else {
             try? line.write(to: url, atomically: true, encoding: .utf8)
         }
